@@ -187,12 +187,12 @@ export default function HomePage() {
         Math.round(APP_CONFIG.basePriceTokens * Math.pow(10, APP_CONFIG.tokenDecimals))
       );
       const quoteUrl =
-        `https://quote-api.jup.ag/v6/quote?inputMint=${encodeURIComponent(APP_CONFIG.tokenMint)}` +
-        `&outputMint=So11111111111111111111111111111111111111112&amount=${amountRaw}&slippageBps=50`;
+        `/api/price?mint=${encodeURIComponent(APP_CONFIG.tokenMint)}` +
+        `&amount=${amountRaw}`;
 
       const response = await fetch(quoteUrl, { cache: "no-store" });
       if (!response.ok) {
-        throw new Error(`Jupiter quote failed (${response.status})`);
+        throw new Error(`Price proxy failed (${response.status})`);
       }
 
       const quote = (await response.json()) as { outAmount?: string };
