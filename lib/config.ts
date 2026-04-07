@@ -1,3 +1,5 @@
+const parsedFallbackPriceSol = Number(process.env.NEXT_PUBLIC_FALLBACK_PRICE_SOL ?? 0.01);
+
 export const APP_CONFIG = {
   basePriceTokens: Number(process.env.NEXT_PUBLIC_BASE_PRICE_TOKENS ?? 10_000),
   durationSeconds: Number(process.env.NEXT_PUBLIC_DURATION_SECONDS ?? 120),
@@ -7,6 +9,10 @@ export const APP_CONFIG = {
   tokenDecimals: Number(process.env.NEXT_PUBLIC_SPL_TOKEN_DECIMALS ?? 6),
   treasuryWallet: process.env.NEXT_PUBLIC_TREASURY_WALLET ?? "",
   supabaseBucket: process.env.NEXT_PUBLIC_SUPABASE_BUCKET ?? "billboard-images",
+  fallbackPriceSol:
+    Number.isFinite(parsedFallbackPriceSol) && parsedFallbackPriceSol > 0
+      ? parsedFallbackPriceSol
+      : 0.01,
   rpcUrl: process.env.NEXT_PUBLIC_RPC_URL ?? "",
   network: process.env.NEXT_PUBLIC_SOLANA_NETWORK ?? "mainnet-beta"
 };

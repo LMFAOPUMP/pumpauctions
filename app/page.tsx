@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
 import {
@@ -12,7 +12,7 @@ import {
   TOKEN_PROGRAM_ID
 } from "@solana/spl-token";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { PublicKey, Transaction } from "@solana/web3.js";
+import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { WalletConnectButton } from "@/components/wallet-connect-button";
 import { APP_CONFIG, isCoreConfigReady } from "@/lib/config";
 import { getCycleProgress, getCurrentPrice } from "@/lib/pricing";
@@ -29,6 +29,13 @@ function formatTokens(value: number | string) {
   });
 }
 
+function formatSol(value: number) {
+  return value.toLocaleString("en-US", {
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 6
+  });
+}
+
 export default function HomePage() {
   const { connected, publicKey, sendTransaction } = useWallet();
   const connection = useMemo(
@@ -42,6 +49,8 @@ export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isBuying, setIsBuying] = useState(false);
+  const [basePriceSol, setBasePriceSol] = useState(APP_CONFIG.fallbackPriceSol);
+  const [isSolPriceLive, setIsSolPriceLive] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => setNowTs(Date.now()), 1000);
@@ -131,6 +140,19 @@ export default function HomePage() {
     [secondsElapsed]
   );
 
+  const currentPriceSol = useMemo(() => {
+    if (APP_CONFIG.basePriceTokens <= 0) {
+      return basePriceSol;
+    }
+
+    return (currentPrice / APP_CONFIG.basePriceTokens) * basePriceSol;
+  }, [basePriceSol, currentPrice]);
+
+  const currentPriceLamports = useMemo(
+    () => Math.max(1, Math.round(currentPriceSol * LAMPORTS_PER_SOL)),
+    [currentPriceSol]
+  );
+
   const progressRatio = useMemo(
     () => getCycleProgress(secondsElapsed, APP_CONFIG.durationSeconds),
     [secondsElapsed]
@@ -151,6 +173,52 @@ export default function HomePage() {
 
     return "PUMP AUCTIONS";
   }, []);
+
+  const fetchSolPrice = useCallback(async () => {
+    if (!APP_CONFIG.tokenMint) {
+      setBasePriceSol(APP_CONFIG.fallbackPriceSol);
+      setIsSolPriceLive(false);
+      return;
+    }
+
+    try {
+      const amountRaw = Math.max(
+        1,
+        Math.round(APP_CONFIG.basePriceTokens * Math.pow(10, APP_CONFIG.tokenDecimals))
+      );
+      const quoteUrl =
+        `https://quote-api.jup.ag/v6/quote?inputMint=${encodeURIComponent(APP_CONFIG.tokenMint)}` +
+        `&outputMint=So11111111111111111111111111111111111111112&amount=${amountRaw}&slippageBps=50`;
+
+      const response = await fetch(quoteUrl, { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Jupiter quote failed (${response.status})`);
+      }
+
+      const quote = (await response.json()) as { outAmount?: string };
+      const outLamports = Number(quote.outAmount ?? 0);
+      if (!Number.isFinite(outLamports) || outLamports <= 0) {
+        throw new Error("No Jupiter liquidity route for this token.");
+      }
+
+      setBasePriceSol(outLamports / LAMPORTS_PER_SOL);
+      setIsSolPriceLive(true);
+    } catch (error) {
+      console.warn("[PumpAuctions] Falling back to NEXT_PUBLIC_FALLBACK_PRICE_SOL", error);
+      setBasePriceSol(APP_CONFIG.fallbackPriceSol);
+      setIsSolPriceLive(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchSolPrice();
+
+    const interval = setInterval(() => {
+      void fetchSolPrice();
+    }, 30_000);
+
+    return () => clearInterval(interval);
+  }, [fetchSolPrice]);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -211,7 +279,18 @@ export default function HomePage() {
     return data.publicUrl;
   };
 
-  const handleBuySpot = async () => {
+  const clearSelectedImage = () => {
+    setSelectedFile(null);
+    setPreviewUrl((previous) => {
+      if (previous) {
+        URL.revokeObjectURL(previous);
+      }
+
+      return null;
+    });
+  };
+
+  const handleBuySpotToken = async () => {
     if (!connected || !publicKey) {
       toast.error("Connect your wallet before buying.");
       return;
@@ -232,13 +311,7 @@ export default function HomePage() {
       return;
     }
 
-    const clickPrice = getCurrentPrice({
-      secondsElapsed,
-      basePrice: APP_CONFIG.basePriceTokens,
-      maxMultiplier: APP_CONFIG.maxMultiplier,
-      durationSeconds: APP_CONFIG.durationSeconds,
-      stepSeconds: APP_CONFIG.stepSeconds
-    });
+    const clickPrice = currentPrice;
 
     setIsBuying(true);
 
@@ -352,16 +425,80 @@ export default function HomePage() {
         );
       }
 
-      setSelectedFile(null);
-      setPreviewUrl((previous) => {
-        if (previous) {
-          URL.revokeObjectURL(previous);
-        }
-
-        return null;
-      });
+      clearSelectedImage();
 
       toast.success("You got the spot. The billboard is now yours.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      toast.error(message);
+    } finally {
+      setIsBuying(false);
+    }
+  };
+
+  const handleBuySpotSol = async () => {
+    if (!connected || !publicKey) {
+      toast.error("Connect your wallet before buying.");
+      return;
+    }
+
+    if (!selectedFile) {
+      toast.error("Upload an image first.");
+      return;
+    }
+
+    if (!hasSupabaseConfig) {
+      toast.error("Missing Supabase configuration.");
+      return;
+    }
+
+    if (!isCoreConfigReady) {
+      toast.error("Missing Solana configuration.");
+      return;
+    }
+
+    const clickPrice = currentPrice;
+    const lamportsToPay = currentPriceLamports;
+
+    setIsBuying(true);
+
+    try {
+      const imageUrl = await uploadImage(selectedFile, publicKey.toBase58());
+      const treasuryWallet = new PublicKey(APP_CONFIG.treasuryWallet);
+
+      const transferTx = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: publicKey,
+          toPubkey: treasuryWallet,
+          lamports: lamportsToPay
+        })
+      );
+
+      const signature = await sendTransaction(transferTx, connection, {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+        maxRetries: 3
+      });
+
+      await connection.confirmTransaction(signature, "confirmed");
+
+      const { error: insertError } = await supabase.from("billboard_history").insert({
+        buyer_wallet: publicKey.toBase58(),
+        image_url: imageUrl,
+        tx_signature: signature,
+        paid_amount_tokens: clickPrice,
+        paid_amount_raw: String(lamportsToPay),
+        displayed_from: new Date().toISOString()
+      });
+
+      if (insertError) {
+        throw new Error(
+          `Transaction confirmed (${signature}) but Supabase insert failed: ${insertError.message}`
+        );
+      }
+
+      clearSelectedImage();
+      toast.success(`You got the spot with ${formatSol(currentPriceSol)} SOL.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       toast.error(message);
@@ -480,6 +617,18 @@ export default function HomePage() {
                   <p className="neon-display text-3xl text-neonYellow sm:text-4xl">
                     {formatTokens(currentPrice)} TOKENS
                   </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <p className="text-lg font-semibold text-white sm:text-xl">{formatSol(currentPriceSol)} SOL</p>
+                    <span
+                      className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${
+                        isSolPriceLive
+                          ? "border-emerald-300/50 bg-emerald-400/15 text-emerald-200"
+                          : "border-amber-300/50 bg-amber-300/15 text-amber-200"
+                      }`}
+                    >
+                      {isSolPriceLive ? "Live Market Price" : "Live Market Price (Fallback)"}
+                    </span>
+                  </div>
                 </div>
                 <p className="text-xs text-white/70">Floor: {formatTokens(APP_CONFIG.basePriceTokens)} TOKENS</p>
               </div>
@@ -525,29 +674,36 @@ export default function HomePage() {
               will be stretched to fill the billboard.
             </p>
 
-            <motion.button
-              type="button"
-              onClick={handleBuySpot}
-              disabled={isBuying || !connected || !selectedFile || missingConfigMessages.length > 0}
-              whileHover={{ scale: 1.01 }}
-              whileTap={{ scale: 0.98 }}
-              className="buy-cta-glow mt-5 w-full rounded-2xl border border-neonYellow/70 bg-gradient-to-r from-neonPink/95 via-[#ff7d55] to-neonYellow/90 px-5 py-5 text-left text-black shadow-neon-strong transition disabled:cursor-not-allowed disabled:opacity-50 sm:py-6"
-            >
-              <p className="neon-display flex items-center gap-2 text-[1.7rem] leading-none sm:text-[2rem]">
-                <span>TAKE THE CROWN</span>
-                <svg
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                  className="h-7 w-7"
-                  fill="currentColor"
-                >
-                  <path d="M3 7.5a1 1 0 0 1 1.55-.83L9 9.75l2.22-4.07a1 1 0 0 1 1.76 0L15.2 9.75l4.45-3.08A1 1 0 0 1 21.2 7.7l-2.5 10a1 1 0 0 1-.97.76H6.27a1 1 0 0 1-.97-.76l-2.3-9.2a.99.99 0 0 1 0-.2v-.8zM7 20.5a1 1 0 1 1 0-2h10a1 1 0 1 1 0 2H7z" />
-                </svg>
-              </p>
-              <p className="mt-2 text-base font-semibold sm:text-lg">
-                {isBuying ? "Transaction in progress..." : `Buy now for ${formatTokens(currentPrice)} TOKENS`}
-              </p>
-            </motion.button>
+            <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <motion.button
+                type="button"
+                onClick={handleBuySpotToken}
+                disabled={isBuying || !connected || !selectedFile || missingConfigMessages.length > 0}
+                whileHover={{ scale: 1.01 }}
+                whileTap={{ scale: 0.98 }}
+                className="buy-cta-glow w-full rounded-2xl border border-neonYellow/70 bg-gradient-to-r from-neonPink/95 via-[#ff7d55] to-neonYellow/90 px-5 py-5 text-left text-black shadow-neon-strong transition disabled:cursor-not-allowed disabled:opacity-50 sm:py-6"
+              >
+                <p className="neon-display text-[1.3rem] leading-none sm:text-[1.55rem]">PAY WITH TOKEN</p>
+                <p className="mt-2 text-base font-semibold sm:text-lg">
+                  {isBuying ? "Transaction in progress..." : `${formatTokens(currentPrice)} TOKENS`}
+                </p>
+              </motion.button>
+
+              <motion.button
+                type="button"
+                onClick={handleBuySpotSol}
+                disabled={isBuying || !connected || !selectedFile || missingConfigMessages.length > 0}
+                whileHover={{ scale: 1.01 }}
+                whileTap={{ scale: 0.98 }}
+                className="buy-sol-cta-glow w-full rounded-2xl border border-violet-300/70 bg-gradient-to-r from-violet-500/95 via-fuchsia-500/95 to-indigo-500/95 px-5 py-5 text-left text-white shadow-[0_0_30px_rgba(166,0,255,0.45)] transition disabled:cursor-not-allowed disabled:opacity-50 sm:py-6"
+              >
+                <p className="neon-display text-[1.3rem] leading-none sm:text-[1.55rem]">PAY WITH SOL</p>
+                <p className="mt-2 text-base font-semibold sm:text-lg">{formatSol(currentPriceSol)} SOL</p>
+                <p className="mt-1 text-[11px] uppercase tracking-[0.14em] text-violet-100/90">
+                  {isSolPriceLive ? "Live Market Price" : "Live Market Price (Fallback)"}
+                </p>
+              </motion.button>
+            </div>
 
             <div className="mt-6">
               <h3 className="mb-3 text-xs uppercase tracking-[0.2em] text-white/70">Recent Kings</h3>

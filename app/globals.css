@@ -99,10 +99,28 @@ h3,
   }
 }
 
+@keyframes neonPulseButtonViolet {
+  0%,
+  100% {
+    box-shadow:
+      0 0 26px rgba(140, 0, 255, 0.45),
+      0 0 44px rgba(244, 0, 255, 0.34);
+  }
+  50% {
+    box-shadow:
+      0 0 40px rgba(166, 0, 255, 0.68),
+      0 0 62px rgba(244, 0, 255, 0.52);
+  }
+}
+
 .king-card-glow {
   animation: neonPulseCard 2.7s ease-in-out infinite;
 }
 
 .buy-cta-glow {
   animation: neonPulseButton 2.1s ease-in-out infinite;
+}
+
+.buy-sol-cta-glow {
+  animation: neonPulseButtonViolet 1.85s ease-in-out infinite;
 }
